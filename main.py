@@ -18,7 +18,6 @@ from email import encoders
 from datetime import datetime
 import base64
 import imaplib
-from dotenv import load_dotenv
 
 load_dotenv()
 import streamlit.components.v1 as components
@@ -27,12 +26,13 @@ DEFAULT_POPPLER = r"C:\Program Files\poppler-23.05.0\Library\bin"
 DEFAULT_TESSERACT = ""  # e.g. r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Email Configuration (Your credentials)
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = int(os.getenv("SMTP_PORT"))
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-IMAP_SERVER = os.getenv("IMAP_SERVER")
-IMAP_PORT = int(os.getenv("IMAP_PORT"))
+SMTP_SERVER = st.secrets["smtp"]["server"]
+SMTP_PORT = st.secrets["smtp"]["port"]
+SENDER_EMAIL = st.secrets["smtp"]["sender_email"]
+SENDER_PASSWORD = st.secrets["smtp"]["sender_password"]
+IMAP_SERVER = st.secrets["imap"]["server"]
+IMAP_PORT = st.secrets["imap"]["port"]
+
 
 
 # Test recipient email (hardcoded for testing)

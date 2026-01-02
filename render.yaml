@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: pdf-splitter
+    env: python
+    buildCommand: |
+      apt-get update
+      apt-get install -y poppler-utils tesseract-ocr
+      pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: SMTP_SERVER
+        sync: false
+      - key: SMTP_PORT
+        value: 587
+      - key: SENDER_EMAIL
+        sync: false
+      - key: SENDER_PASSWORD
+        sync: false
+      - key: TEST_RECIPIENT
+        sync: false

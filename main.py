@@ -5,6 +5,7 @@ from PyPDF2 import PdfReader, PdfWriter
 from pdf2image import convert_from_path
 from PIL import Image
 import pytesseract
+import shutil
 import re
 import os
 import io
@@ -51,8 +52,14 @@ IMAP_SERVER = os.getenv("IMAP_SERVER")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
 TEST_RECIPIENT = os.getenv("TEST_RECIPIENT")
 # PDF Configuration
-DEFAULT_POPPLER = None
-DEFAULT_TESSERACT = None
+DEFAULT_POPPLER = shutil.which('pdftoppm')  # Returns path or None
+if DEFAULT_POPPLER:
+    DEFAULT_POPPLER = os.path.dirname(DEFAULT_POPPLER)
+
+DEFAULT_TESSERACT = shutil.which('tesseract')  # Returns path or None
+
+if DEFAULT_TESSERACT:
+    pytesseract.pytesseract.tesseract_cmd = DEFAULT_TESSERACT
 
 INVOICE_KEYWORDS = [r"tax\s+invoice", r"invoice\s+no", r"invoice\s+#", r"invoice\b"]
 RECEIVER_LABELS = [

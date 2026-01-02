@@ -21,7 +21,7 @@ from email import encoders
 from datetime import datetime
 import threading
 import time
-from flask_cors import CORS
+
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
@@ -51,13 +51,13 @@ SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 IMAP_SERVER = os.getenv("IMAP_SERVER")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
 TEST_RECIPIENT = os.getenv("TEST_RECIPIENT")
-# PDF Configuration
-DEFAULT_POPPLER = shutil.which('pdftoppm')  # Returns path or None
+
+# PDF Configuration - Auto-detect system binaries
+DEFAULT_POPPLER = shutil.which('pdftoppm')
 if DEFAULT_POPPLER:
     DEFAULT_POPPLER = os.path.dirname(DEFAULT_POPPLER)
 
-DEFAULT_TESSERACT = shutil.which('tesseract')  # Returns path or None
-
+DEFAULT_TESSERACT = shutil.which('tesseract')
 if DEFAULT_TESSERACT:
     pytesseract.pytesseract.tesseract_cmd = DEFAULT_TESSERACT
 
@@ -69,9 +69,6 @@ RECEIVER_LABELS = [
 
 # Global storage for progress tracking
 processing_status = {}
-
-if DEFAULT_TESSERACT:
-    pytesseract.pytesseract.tesseract_cmd = DEFAULT_TESSERACT
 
 
 # ============= Helper Classes =============
@@ -311,8 +308,7 @@ def split_pdf_auto_detect_file(src_path: str, output_folder: str, poppler_path: 
         if cur['invoice_no'] != prev['invoice_no']:
             starts.append(i)
             continue
-        if prev['invoice_no'] == '(not found)' and cur['invoice_no'] == '(not found)' and cur['has_kw'] and not prev[
-            'has_kw']:
+        if prev['invoice_no'] == '(not found)' and cur['invoice_no'] == '(not found)' and cur['has_kw'] and not prev['has_kw']:
             starts.append(i)
 
     exported = []
@@ -367,7 +363,10 @@ def process_pdf_task(task_id, file_path, doc_type):
             'emails_sent': 0
         }
 
-         poppler = None
+        tmpdir = tempfile.mkdtemp()
+        
+        # Check if DEFAULT_POPPLER exists and is a directory
+        poppler = None
         if DEFAULT_POPPLER and os.path.isdir(DEFAULT_POPPLER):
             poppler = DEFAULT_POPPLER
 

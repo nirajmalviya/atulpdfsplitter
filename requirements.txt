@@ -7,3 +7,12 @@ pytesseract
 Pillow
 pandas
 openpyxl
+Flask==3.0.0
+flask-cors==4.0.0
+PyPDF2==3.0.1
+pdf2image==1.16.3
+Pillow==10.1.0
+pytesseract==0.3.10
+pandas==2.1.4
+openpyxl==3.1.2
+Werkzeug==3.0.1

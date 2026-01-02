@@ -33,7 +33,7 @@ CORS(app, resources={
 
 
 # Configuration
-UPLOAD_FOLDER = 'uploads'
+UPLOAD_FOLDER = "/tmp/uploads"
 ALLOWED_EXTENSIONS = {'pdf'}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 

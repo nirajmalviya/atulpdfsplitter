@@ -360,8 +360,9 @@ def process_pdf_task(task_id, file_path, doc_type):
             'emails_sent': 0
         }
 
-        tmpdir = tempfile.mkdtemp()
-        poppler = DEFAULT_POPPLER if os.path.isdir(DEFAULT_POPPLER) else None
+         poppler = None
+        if DEFAULT_POPPLER and os.path.isdir(DEFAULT_POPPLER):
+            poppler = DEFAULT_POPPLER
 
         # Split PDF
         exported = split_pdf_auto_detect_file(file_path, tmpdir, poppler)

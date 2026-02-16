@@ -14,6 +14,7 @@ import zipfile
 import pandas as pd
 from typing import List, Tuple, Dict
 import smtplib
+import requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -21,6 +22,7 @@ from email import encoders
 from datetime import datetime
 import threading
 import time
+import socket
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -30,7 +32,6 @@ CORS(app, resources={
         "allow_headers": ["Content-Type", "Authorization"]
     }
 })
-
 
 # Configuration
 UPLOAD_FOLDER = "/tmp/uploads"
@@ -43,14 +44,21 @@ app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 # Create necessary folders
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Email Configuration
-SMTP_SERVER = os.getenv("SMTP_SERVER")
+# Email Configuration - Rediffmail Pro
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.rediffmailpro.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "docs.mail@atulsales.com")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-IMAP_SERVER = os.getenv("IMAP_SERVER")
+IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.rediffmailpro.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
-TEST_RECIPIENT = os.getenv("TEST_RECIPIENT")
+TEST_RECIPIENT = os.getenv("TEST_RECIPIENT", "docs.mail@atulsales.com")
+
+# Email retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+
+# Customer API Configuration
+CUSTOMER_API_URL = "http://192.168.0.102/api/Customer/LoadCustomerDetailsByCode"
 
 # PDF Configuration - Auto-detect system binaries
 DEFAULT_POPPLER = shutil.which('pdftoppm')
@@ -81,20 +89,32 @@ class MailSender:
         self.password = password
         self.imap_server = imap_server
         self.imap_port = imap_port
+        self._sent_folder_cache = None  # Cache the detected folder
 
     def send_invoice_email(self, pdf_path: str, receiver_name: str, invoice_no: str,
                            invoice_date: str, net_amount: str, recipient_email: str,
                            doc_type: str = 'Invoice') -> Tuple[bool, str]:
-        try:
-            display_name = receiver_name.replace('(not found)', 'Valued Customer')
-            formatted_date = self._format_date_for_display(invoice_date)
+        """Send email with retry logic and detailed error reporting"""
 
-            msg = MIMEMultipart()
-            msg['From'] = self.username
-            msg['To'] = recipient_email
-            msg['Subject'] = f"{doc_type} for {display_name} - {invoice_no}"
+        for attempt in range(MAX_RETRIES):
+            try:
+                print(f"\n{'=' * 60}")
+                print(f"[ATTEMPT {attempt + 1}/{MAX_RETRIES}] Sending email to {recipient_email}")
+                print(f"SMTP Server: {self.smtp_server}:{self.smtp_port}")
+                print(f"From: {self.username}")
+                print(f"{'=' * 60}\n")
 
-            body = f"""Dear {display_name},
+                display_name = receiver_name.replace('(not found)', 'Valued Customer')
+                formatted_date = self._format_date_for_display(invoice_date)
+
+                msg = MIMEMultipart()
+                msg['From'] = self.username
+                msg['To'] = recipient_email
+                msg['Subject'] = f"{doc_type} for {display_name} - {invoice_no}"
+                msg['Date'] = datetime.now().strftime('%a, %d %b %Y %H:%M:%S %z')
+                msg['Message-ID'] = self._generate_message_id()
+
+                body = f"""Dear {display_name},
 
 Please find attached the {doc_type} ({invoice_no}) dated {formatted_date} for your reference.
 
@@ -103,31 +123,328 @@ Kindly review the details and process the payment as per the agreed terms. Shoul
 Thank you for your continued business.
 
 Best regards,
-Kantascrypt Team
+Atul Sales Team
 {self.username}
-            """
+                """
 
-            msg.attach(MIMEText(body, 'plain'))
+                msg.attach(MIMEText(body, 'plain'))
 
-            filename = os.path.basename(pdf_path)
-            with open(pdf_path, 'rb') as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
-                encoders.encode_base64(part)
-                part.add_header('Content-Disposition', f'attachment; filename= {filename}')
-                msg.attach(part)
+                filename = os.path.basename(pdf_path)
+                with open(pdf_path, 'rb') as f:
+                    part = MIMEBase('application', 'octet-stream')
+                    part.set_payload(f.read())
+                    encoders.encode_base64(part)
+                    part.add_header('Content-Disposition', f'attachment; filename= {filename}')
+                    msg.attach(part)
 
-            server = smtplib.SMTP(self.smtp_server, self.smtp_port)
-            server.starttls()
-            server.login(self.username, self.password)
-            text = msg.as_string()
-            server.sendmail(self.username, recipient_email, text)
-            server.quit()
+                # Test DNS resolution first
+                try:
+                    socket.getaddrinfo(self.smtp_server, self.smtp_port)
+                    print(f"✓ DNS resolution successful for {self.smtp_server}")
+                except socket.gaierror as e:
+                    raise Exception(f"DNS resolution failed for {self.smtp_server}: {str(e)}")
 
-            return True, f"Email sent successfully to {recipient_email}"
+                # Send email via SMTP with detailed logging
+                print(f"[1/4] Connecting to SMTP server...")
+                server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=30)
+
+                print(f"[2/4] Starting TLS...")
+                server.starttls()
+
+                print(f"[3/4] Authenticating...")
+                server.login(self.username, self.password)
+
+                print(f"[4/4] Sending message...")
+                text = msg.as_string()
+                server.sendmail(self.username, recipient_email, text)
+
+                print(f"✓ Email sent successfully via SMTP")
+                server.quit()
+
+                # Save to Sent folder via IMAP (MailKit-style approach)
+                imap_success = self._append_to_sent_async(msg)
+                if imap_success:
+                    print(f"✓ Email saved to Sent folder")
+                else:
+                    print(f"⚠ Warning: Email sent but not saved to Sent folder")
+
+                return True, f"Email sent successfully to {recipient_email}"
+
+            except smtplib.SMTPAuthenticationError as e:
+                error_msg = f"Authentication failed. Please check email/password: {str(e)}"
+                print(f"✗ {error_msg}")
+                return False, error_msg  # Don't retry auth errors
+
+            except smtplib.SMTPServerDisconnected as e:
+                error_msg = f"Server disconnected: {str(e)}"
+                print(f"✗ {error_msg}")
+
+                if attempt < MAX_RETRIES - 1:
+                    print(f"⟳ Retrying in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                    continue
+                return False, f"Failed after {MAX_RETRIES} attempts: {error_msg}"
+
+            except smtplib.SMTPException as e:
+                error_msg = f"SMTP error: {str(e)}"
+                print(f"✗ {error_msg}")
+
+                if attempt < MAX_RETRIES - 1:
+                    print(f"⟳ Retrying in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                    continue
+                return False, f"Failed after {MAX_RETRIES} attempts: {error_msg}"
+
+            except socket.timeout as e:
+                error_msg = f"Connection timeout: {str(e)}"
+                print(f"✗ {error_msg}")
+
+                if attempt < MAX_RETRIES - 1:
+                    print(f"⟳ Retrying in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                    continue
+                return False, f"Failed after {MAX_RETRIES} attempts: {error_msg}"
+
+            except Exception as e:
+                error_msg = f"Unexpected error: {str(e)}"
+                print(f"✗ {error_msg}")
+                import traceback
+                print(traceback.format_exc())
+
+                if attempt < MAX_RETRIES - 1:
+                    print(f"⟳ Retrying in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                    continue
+                return False, f"Failed after {MAX_RETRIES} attempts: {error_msg}"
+
+        return False, f"Failed to send email after {MAX_RETRIES} attempts"
+
+    def _generate_message_id(self) -> str:
+        """Generate a unique Message-ID for the email"""
+        import random
+        import string
+        domain = self.username.split('@')[1] if '@' in self.username else 'localhost'
+        unique_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=20))
+        timestamp = int(time.time())
+        return f"<{timestamp}.{unique_id}@{domain}>"
+
+    def _detect_sent_folder_async(self, imap) -> str:
+        """
+        Detect the Sent folder - MailKit style approach
+        Returns the folder name if found, None otherwise
+        """
+
+        # If we already detected it, use cached value
+        if self._sent_folder_cache:
+            print(f"[IMAP] Using cached Sent folder: '{self._sent_folder_cache}'")
+            return self._sent_folder_cache
+
+        # Comprehensive list of Sent folder patterns
+        sent_folder_candidates = [
+            'Sent',
+            'Sent Items',
+            'Sent Messages',
+            'Sent Mail',
+            'INBOX.Sent',
+            'INBOX/Sent',
+            'INBOX.Sent Items',
+            'sent',
+            'SENT',
+        ]
+
+        print(f"[IMAP] Trying to detect Sent folder from {len(sent_folder_candidates)} candidates...")
+
+        for idx, folder_name in enumerate(sent_folder_candidates):
+            try:
+                # Try to select the folder (MailKit GetFolder equivalent)
+                status, data = imap.select(folder_name, readonly=True)
+                if status == 'OK':
+                    # Successfully found the folder
+                    try:
+                        imap.close()  # Close the folder after testing
+                    except:
+                        pass
+
+                    # Cache it for future use
+                    self._sent_folder_cache = folder_name
+                    print(f"[IMAP] ✓ Detected Sent folder: '{folder_name}' (attempt {idx + 1})")
+                    return folder_name
+            except Exception:
+                # This folder doesn't exist or can't be accessed
+                continue
+
+        print(f"[IMAP] ⚠ Could not auto-detect Sent folder")
+        return None
+
+    def _get_or_create_sent_folder(self, imap) -> str:
+        """
+        Get or create the Sent folder - mimics MailKit's approach:
+        1. Try to detect existing folder
+        2. Try to create 'Sent' folder
+        3. Try common fallbacks
+        """
+
+        # Step 1: Try to detect existing folder
+        sent_folder = self._detect_sent_folder_async(imap)
+        if sent_folder:
+            return sent_folder
+
+        # Step 2: List all folders to help with debugging
+        print("[IMAP] Listing available folders for debugging:")
+        try:
+            status, folder_list = imap.list()
+            if status == 'OK':
+                for folder_info in folder_list[:20]:  # Show first 20
+                    folder_str = folder_info.decode('utf-8') if isinstance(folder_info, bytes) else str(folder_info)
+                    print(f"[IMAP]   {folder_str}")
+        except Exception as e:
+            print(f"[IMAP] Could not list folders: {e}")
+
+        # Step 3: Try to create 'Sent' folder (MailKit CreateAsync equivalent)
+        print("[IMAP] Attempting to create 'Sent' folder...")
+        try:
+            status, data = imap.create('Sent')
+            if status == 'OK':
+                print("[IMAP] ✓ Created 'Sent' folder")
+                self._sent_folder_cache = 'Sent'
+                return 'Sent'
+            else:
+                print(f"[IMAP] Could not create 'Sent' folder: {status}")
+        except Exception as e:
+            print(f"[IMAP] Exception creating 'Sent' folder: {e}")
+
+        # Step 4: Try 'Sent Items' as fallback
+        print("[IMAP] Attempting to create 'Sent Items' folder...")
+        try:
+            status, data = imap.create('Sent Items')
+            if status == 'OK':
+                print("[IMAP] ✓ Created 'Sent Items' folder")
+                self._sent_folder_cache = 'Sent Items'
+                return 'Sent Items'
+        except Exception as e:
+            print(f"[IMAP] Exception creating 'Sent Items' folder: {e}")
+
+        print("[IMAP] ❌ Failed to get or create Sent folder")
+        return None
+
+    def _append_to_sent_async(self, msg: MIMEMultipart) -> bool:
+        """
+        Append message to Sent folder - MailKit-style approach
+        Returns True on success, False on failure
+
+        This closely follows the C# MailKit implementation:
+        1. Connect via SSL
+        2. Authenticate
+        3. Detect/Create Sent folder
+        4. Open folder in ReadWrite mode (simulated via non-readonly select)
+        5. Append with Seen flag
+        """
+        import imaplib
+        import email.utils
+
+        imap = None
+
+        try:
+            # Step 1: Connect IMAP over SSL (MailKit: ConnectAsync with SslOnConnect)
+            print(f"[IMAP] Connecting to {self.imap_server}:{self.imap_port} with SSL...")
+            imap = imaplib.IMAP4_SSL(self.imap_server, self.imap_port, timeout=30)
+            print("[IMAP] ✓ Connected via SSL")
+
+            # Step 2: Authenticate (MailKit: AuthenticateAsync)
+            print(f"[IMAP] Authenticating as {self.username}...")
+            result = imap.login(self.username, self.password)
+            print(f"[IMAP] ✓ Authenticated: {result}")
+
+            # Step 3: Get or create Sent folder (MailKit: GetFolder/CreateAsync)
+            sent_folder = self._get_or_create_sent_folder(imap)
+
+            if not sent_folder:
+                print("[IMAP] ❌ Cannot proceed without a Sent folder")
+                return False
+
+            print(f"[IMAP] Using Sent folder: '{sent_folder}'")
+
+            # Step 4: Open folder in ReadWrite mode (MailKit: OpenAsync with ReadWrite)
+            # In imaplib, we just select without readonly=True
+            print(f"[IMAP] Opening folder '{sent_folder}' in ReadWrite mode...")
+            status, data = imap.select(sent_folder, readonly=False)
+
+            if status != 'OK':
+                print(f"[IMAP] ❌ Failed to open folder: {status}")
+                return False
+
+            print(f"[IMAP] ✓ Folder opened: {data}")
+
+            # Step 5: Prepare the message
+            if 'Date' not in msg:
+                msg['Date'] = email.utils.formatdate(localtime=True)
+
+            if 'Message-ID' not in msg:
+                msg['Message-ID'] = self._generate_message_id()
+
+            # Convert message to bytes
+            msg_string = msg.as_string()
+            msg_bytes = msg_string.encode('utf-8')
+
+            # Get current time for IMAP internal date
+            import time as time_module
+            current_time = time_module.time()
+            internal_date = imaplib.Time2Internaldate(current_time)
+
+            # Step 6: Append message with \Seen flag (MailKit: AppendAsync with MessageFlags.Seen)
+            print(f"[IMAP] Appending message ({len(msg_bytes)} bytes) with \\Seen flag...")
+
+            result = imap.append(
+                sent_folder,
+                '\\Seen',  # MessageFlags.Seen equivalent
+                internal_date,
+                msg_bytes
+            )
+
+            if result[0] == 'OK':
+                print(f"[IMAP] ✅ Message successfully appended to '{sent_folder}'")
+                print(f"[IMAP] Server response: {result}")
+
+                # Close the folder after appending (MailKit does this in Dispose)
+                try:
+                    imap.close()
+                    print(f"[IMAP] ✓ Folder closed")
+                except:
+                    pass
+
+                return True
+            else:
+                print(f"[IMAP] ❌ APPEND failed: {result}")
+                return False
+
+        except imaplib.IMAP4.abort as e:
+            print(f"[IMAP] ❌ Connection aborted: {str(e)}")
+            return False
+
+        except imaplib.IMAP4.error as e:
+            print(f"[IMAP] ❌ IMAP protocol error: {str(e)}")
+            return False
+
+        except socket.timeout as e:
+            print(f"[IMAP] ❌ Connection timeout: {str(e)}")
+            return False
 
         except Exception as e:
-            return False, f"Failed to send email: {str(e)}"
+            print(f"[IMAP] ❌ Unexpected error: {str(e)}")
+            print(f"[IMAP] Error type: {type(e).__name__}")
+            import traceback
+            print(f"[IMAP] Traceback:\n{traceback.format_exc()}")
+            return False
+
+        finally:
+            # Disconnect (MailKit: DisconnectAsync)
+            if imap:
+                try:
+                    # Properly disconnect with expunge
+                    imap.logout()
+                    print("[IMAP] ✓ Disconnected")
+                except Exception as logout_error:
+                    print(f"[IMAP] Warning: Disconnect failed: {logout_error}")
 
     def _format_date_for_display(self, date_str: str) -> str:
         try:
@@ -142,6 +459,70 @@ Kantascrypt Team
             return date_obj.strftime(f"%d{suffix} %B %Y")
         except:
             return date_str
+
+
+# ============= Customer API Functions =============
+
+def fetch_customer_details_from_api(customer_codes: List[str]) -> Dict[str, dict]:
+    """
+    Fetch customer details from the API
+
+    Args:
+        customer_codes: List of customer codes to fetch
+
+    Returns:
+        Dictionary mapping customer codes to customer details
+    """
+    try:
+        # Filter out invalid customer codes
+        valid_codes = [code for code in customer_codes if code != '(not found)']
+
+        if not valid_codes:
+            return {}
+
+        # Prepare request payload
+        payload = {
+            "customerdetails": [
+                {"customercode": int(code)} for code in valid_codes
+            ]
+        }
+
+        # Make API request
+        response = requests.post(
+            CUSTOMER_API_URL,
+            json=payload,
+            headers={'Content-Type': 'application/json'},
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        # Parse response
+        data = response.json()
+
+        if not data.get('status', False):
+            print(f"API returned error: {data.get('message', 'Unknown error')}")
+            return {}
+
+        # Map customer codes to details
+        customer_map = {}
+        for customer in data.get('data', []):
+            customer_code = str(customer.get('customercode', ''))
+            customer_map[customer_code] = {
+                'customermasterid': customer.get('customermasterid', ''),
+                'customername': customer.get('customername', ''),
+                'emailid': customer.get('emailid', ''),
+                'customercode': customer.get('customercode', '')
+            }
+
+        return customer_map
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching customer details: {str(e)}")
+        return {}
+    except Exception as e:
+        print(f"Unexpected error in fetch_customer_details_from_api: {str(e)}")
+        return {}
 
 
 # ============= PDF Processing Functions =============
@@ -308,7 +689,8 @@ def split_pdf_auto_detect_file(src_path: str, output_folder: str, poppler_path: 
         if cur['invoice_no'] != prev['invoice_no']:
             starts.append(i)
             continue
-        if prev['invoice_no'] == '(not found)' and cur['invoice_no'] == '(not found)' and cur['has_kw'] and not prev['has_kw']:
+        if prev['invoice_no'] == '(not found)' and cur['invoice_no'] == '(not found)' and cur['has_kw'] and not prev[
+            'has_kw']:
             starts.append(i)
 
     exported = []
@@ -364,7 +746,7 @@ def process_pdf_task(task_id, file_path, doc_type):
         }
 
         tmpdir = tempfile.mkdtemp()
-        
+
         # Check if DEFAULT_POPPLER exists and is a directory
         poppler = None
         if DEFAULT_POPPLER and os.path.isdir(DEFAULT_POPPLER):
@@ -374,8 +756,24 @@ def process_pdf_task(task_id, file_path, doc_type):
         exported = split_pdf_auto_detect_file(file_path, tmpdir, poppler)
 
         processing_status[task_id]['total_invoices'] = len(exported)
-        processing_status[task_id]['progress'] = 20
-        processing_status[task_id]['message'] = f'Split complete. Found {len(exported)} invoices. Sending emails...'
+        processing_status[task_id]['progress'] = 15
+        processing_status[task_id][
+            'message'] = f'Split complete. Found {len(exported)} invoices. Fetching customer details...'
+
+        # Extract all customer codes
+        customer_codes = [item['customer_code'] for item in exported if item['customer_code'] != '(not found)']
+
+        # Fetch customer details from API
+        customer_details_map = {}
+        if customer_codes:
+            processing_status[task_id]['message'] = f'Fetching customer details for {len(customer_codes)} customers...'
+            customer_details_map = fetch_customer_details_from_api(customer_codes)
+            processing_status[task_id]['progress'] = 25
+            processing_status[task_id][
+                'message'] = f'Customer details fetched. Found {len(customer_details_map)} customers. Sending emails...'
+        else:
+            processing_status[task_id]['progress'] = 25
+            processing_status[task_id]['message'] = 'No valid customer codes found. Proceeding with test emails...'
 
         # Initialize mailer
         mailer = MailSender(SMTP_SERVER, SMTP_PORT, SENDER_EMAIL, SENDER_PASSWORD, IMAP_SERVER, IMAP_PORT)
@@ -383,40 +781,79 @@ def process_pdf_task(task_id, file_path, doc_type):
         # Send emails
         email_results = []
         for idx, item in enumerate(exported):
+            customer_code = item.get('customer_code', '(not found)')
+
+            # Get customer details from API or use defaults
+            if customer_code in customer_details_map:
+                customer_info = customer_details_map[customer_code]
+                recipient_email = customer_info.get('emailid', TEST_RECIPIENT)
+                customer_name = customer_info.get('customername', item.get('receiver', '(not found)'))
+            else:
+                # Fallback to test recipient if customer not found in API
+                recipient_email = TEST_RECIPIENT
+                customer_name = item.get('receiver', '(not found)')
+
+            # Send email
             success, message = mailer.send_invoice_email(
                 item['path'],
-                item.get('receiver', '(not found)'),
+                customer_name,
                 item.get('invoice_no', '(not found)'),
                 item.get('invoice_date', '(not found)'),
                 item.get('net_amount', '(not found)'),
-                TEST_RECIPIENT,
+                recipient_email,
                 doc_type
             )
 
             email_results.append({
                 'filename': item.get('filename', ''),
-                'receiver': item.get('receiver', '(not found)'),
+                'receiver': customer_name,
+                'customer_code': customer_code,
                 'invoice_no': item.get('invoice_no', '(not found)'),
+                'recipient_email': recipient_email,
                 'status': 'sent' if success else 'failed',
                 'message': message
             })
 
             processing_status[task_id]['emails_sent'] = idx + 1
-            processing_status[task_id]['progress'] = 20 + int((idx + 1) / len(exported) * 60)
+            processing_status[task_id]['progress'] = 25 + int((idx + 1) / len(exported) * 55)
             processing_status[task_id]['email_results'] = email_results
 
         processing_status[task_id]['message'] = 'Creating ZIP and Excel files...'
         processing_status[task_id]['progress'] = 85
 
-        # Create Excel
-        excel_data = [{
-            'Doc Type': doc_type,
-            'Filename': item['filename'],
-            'Customer Code': item['customer_code'],
-            'Receiver Name': item['receiver'],
-            'Invoice No': item['invoice_no'],
-            'Invoice Date': item['invoice_date']
-        } for item in exported]
+        # Create Excel with enhanced data
+        excel_data = []
+        for idx, item in enumerate(exported):
+            customer_code = item['customer_code']
+
+            # Get customer info from API if available
+            if customer_code in customer_details_map:
+                customer_info = customer_details_map[customer_code]
+                excel_data.append({
+                    'Doc Type': doc_type,
+                    'Filename': item['filename'],
+                    'Customer Code': customer_code,
+                    'Customer Name (API)': customer_info.get('customername', ''),
+                    'Receiver Name (PDF)': item['receiver'],
+                    'Email': customer_info.get('emailid', ''),
+                    'Invoice No': item['invoice_no'],
+                    'Invoice Date': item['invoice_date'],
+                    'Net Amount': item.get('net_amount', '(not found)'),
+                    'Email Status': email_results[idx]['status']
+                })
+            else:
+                excel_data.append({
+                    'Doc Type': doc_type,
+                    'Filename': item['filename'],
+                    'Customer Code': customer_code,
+                    'Customer Name (API)': 'Not Found in API',
+                    'Receiver Name (PDF)': item['receiver'],
+                    'Email': 'Not Available',
+                    'Invoice No': item['invoice_no'],
+                    'Invoice Date': item['invoice_date'],
+                    'Net Amount': item.get('net_amount', '(not found)'),
+                    'Email Status': email_results[idx]['status']
+                })
 
         df = pd.DataFrame(excel_data)
         excel_path = os.path.join(tmpdir, 'invoice_summary.xlsx')
@@ -435,10 +872,14 @@ def process_pdf_task(task_id, file_path, doc_type):
         processing_status[task_id]['zip_path'] = zip_path
         processing_status[task_id]['excel_path'] = excel_path
         processing_status[task_id]['summary'] = excel_data
+        processing_status[task_id]['customers_found_in_api'] = len(customer_details_map)
+        processing_status[task_id]['total_customers'] = len(customer_codes)
 
     except Exception as e:
         processing_status[task_id]['status'] = 'error'
         processing_status[task_id]['message'] = str(e)
+        import traceback
+        processing_status[task_id]['traceback'] = traceback.format_exc()
 
 
 # ============= API Endpoints =============
@@ -524,7 +965,118 @@ def health_check():
     return jsonify({'status': 'healthy', 'message': 'PDF Splitter API is running'}), 200
 
 
+@app.route('/api/test-email', methods=['POST'])
+def test_email():
+    """Test endpoint to verify email configuration"""
+    try:
+        data = request.json or {}
+        recipient = data.get('recipient', TEST_RECIPIENT)
+
+        print(f"\n{'=' * 60}")
+        print(f"EMAIL CONFIGURATION TEST")
+        print(f"{'=' * 60}")
+        print(f"SMTP Server: {SMTP_SERVER}:{SMTP_PORT}")
+        print(f"IMAP Server: {IMAP_SERVER}:{IMAP_PORT}")
+        print(f"Sender: {SENDER_EMAIL}")
+        print(f"Recipient: {recipient}")
+        print(f"Password configured: {'Yes' if SENDER_PASSWORD else 'No'}")
+        print(f"{'=' * 60}\n")
+
+        if not SENDER_PASSWORD:
+            return jsonify({
+                'error': 'Email password not configured. Please set SENDER_PASSWORD environment variable.'
+            }), 400
+
+        mailer = MailSender(SMTP_SERVER, SMTP_PORT, SENDER_EMAIL, SENDER_PASSWORD, IMAP_SERVER, IMAP_PORT)
+
+        # Create a test PDF
+        tmpdir = tempfile.mkdtemp()
+        test_pdf_path = os.path.join(tmpdir, 'test_invoice.pdf')
+
+        # Create a simple PDF for testing
+        from reportlab.pdfgen import canvas
+        c = canvas.Canvas(test_pdf_path)
+        c.drawString(100, 750, "TEST INVOICE")
+        c.drawString(100, 700, "This is a test email from the PDF Splitter system")
+        c.save()
+
+        success, message = mailer.send_invoice_email(
+            test_pdf_path,
+            "Test Customer",
+            "TEST-001",
+            "01-Jan-2025",
+            "1000.00",
+            recipient,
+            "Test Invoice"
+        )
+
+        # Cleanup
+        try:
+            os.remove(test_pdf_path)
+            os.rmdir(tmpdir)
+        except:
+            pass
+
+        return jsonify({
+            'success': success,
+            'message': message,
+            'config': {
+                'smtp_server': SMTP_SERVER,
+                'smtp_port': SMTP_PORT,
+                'imap_server': IMAP_SERVER,
+                'imap_port': IMAP_PORT,
+                'sender': SENDER_EMAIL,
+                'recipient': recipient
+            }
+        }), 200 if success else 500
+
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+@app.route('/api/test-customer-api', methods=['POST'])
+def test_customer_api():
+    """Test endpoint to verify customer API integration"""
+    try:
+        data = request.json
+        customer_codes = data.get('customer_codes', [])
+
+        if not customer_codes:
+            return jsonify({'error': 'Please provide customer_codes array'}), 400
+
+        customer_details = fetch_customer_details_from_api(customer_codes)
+
+        return jsonify({
+            'success': True,
+            'customer_codes_requested': customer_codes,
+            'customers_found': len(customer_details),
+            'customer_details': customer_details
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 # ============= Main =============
 
 if __name__ == '__main__':
+    print("\n" + "=" * 60)
+    print("PDF INVOICE SPLITTER - MAILKIT-STYLE IMAP")
+    print("=" * 60)
+    print(f"SMTP Server: {SMTP_SERVER}:{SMTP_PORT}")
+    print(f"IMAP Server: {IMAP_SERVER}:{IMAP_PORT}")
+    print(f"Sender Email: {SENDER_EMAIL}")
+    print(f"Password Configured: {'Yes' if SENDER_PASSWORD else 'NO - PLEASE SET SENDER_PASSWORD!'}")
+    print(f"Test Recipient: {TEST_RECIPIENT}")
+    print("=" * 60 + "\n")
+
+    if not SENDER_PASSWORD:
+        print("⚠️  WARNING: SENDER_PASSWORD environment variable is not set!")
+        print("⚠️  Email sending will fail without a password.")
+        print("⚠️  Please set it before running the application.\n")
+
     app.run(debug=True, host='0.0.0.0', port=5000)

@@ -7,3 +7,5 @@ pytesseract
 Pillow
 pandas
 openpyxl
+requests
+reportlab

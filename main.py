@@ -58,7 +58,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
 # Customer API Configuration
-CUSTOMER_API_URL = "http://192.168.0.102/api/Customer/LoadCustomerDetailsByCode"
+CUSTOMER_API_URL = "https://webapi1.kantascrypt.com/api/Customer/LoadCustomerDetailsByCode"
 
 # PDF Configuration - Auto-detect system binaries
 DEFAULT_POPPLER = shutil.which('pdftoppm')
